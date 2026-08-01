@@ -8,7 +8,7 @@ import pymongo
 import time
 
 # ================== কনফিগারেশন ==================
-API_TOKEN = '8967501202:AAGVVeNJJQXcIP8GBhQqx4YkjHCyTzkt4gE'
+API_TOKEN = '8605665089:AAG0N4NlwlbuKUp_lPA_R-kM1eHe7E24y2k'
 ADMIN_IDS = [8262679678, 8915096050]  # এডমিন আইডি
 
 # চ্যানেল কনফিগারেশন
