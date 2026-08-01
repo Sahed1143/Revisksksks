@@ -1,41 +1,30 @@
+import os
+import json
+import time
+import requests
+from threading import Thread
+from flask import Flask
 import telebot
 from telebot import types
-import json
-import os
-from flask import Flask
-from threading import Thread
 import pymongo
-import time
 
 # ================== কনফিগারেশন ==================
+
 API_TOKEN = '8605665089:AAG0N4NlwlbuKUp_lPA_R-kM1eHe7E24y2k'
 ADMIN_IDS = [8262679678, 8915096050]  # এডমিন আইডি
 
-# চ্যানেল কনফিগারেশন
-CHANNELS = [
-    {"id": -1003730354126, "link": "https://t.me/incomebd0190", "name": "Income BD Channel"},
-    {"id": -1002183552076, "link": "https://t.me/winfanti", "name": "Winfanti Channel"}
-]
+# Firebase Config (আপনার দেওয়া ক্রেডেনশিয়াল)
+FIREBASE_PROJECT_ID = "reviewbotmimu"
+FIREBASE_DB_URL = f"https://{FIREBASE_PROJECT_ID}-default-rtdb.firebaseio.com"
+FIREBASE_API_KEY = "AIzaSyDiG4C3ni0QKIsSpVCATX0MvXfcl0UaJ7k"
 
-# MongoDB URI (Render Environment Variable থেকে নিবে)
+# MongoDB & Local JSON Config
 MONGO_URI = os.getenv("MONGO_URI", "")
 DATA_FILE = 'bot_config.json'
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# ================== ডাটাবেজ সেটআপ (MongoDB / JSON) ==================
-use_mongo = False
-db_collection = None
-
-if MONGO_URI:
-    try:
-        client = pymongo.MongoClient(MONGO_URI)
-        db = client['telegram_bot']
-        db_collection = db['config']
-        use_mongo = True
-        print(" Connected to MongoDB successfully!")
-    except Exception as e:
-        print(f" MongoDB Connection Error: {e}")
+# ================== ডিফল্ট ডাটা স্ট্রাকচার ==================
 
 default_data = {
     "_id": "bot_settings",
@@ -49,50 +38,90 @@ default_data = {
             "file_id": None
         }
     ],
-    "users": [] # ব্রডকাস্টের জন্য ইউজার লিস্ট
+    "channels": [
+        {"id": -1003730354126, "link": "https://t.me/incomebd0190", "name": "Chanel 1"},
+        {"id": -1002183552076, "link": "https://t.me/winfanti", "name": "Chanel 2"}
+    ],
+    "users": []
 }
 
+# ================== ডাটাবেজ সেটআপ (Firebase / Mongo / JSON) ==================
+
+use_mongo = False
+db_collection = None
+
+if MONGO_URI:
+    try:
+        client = pymongo.MongoClient(MONGO_URI)
+        db = client['telegram_bot']
+        db_collection = db['config']
+        use_mongo = True
+        print(" Connected to MongoDB successfully!")
+    except Exception as e:
+        print(f" MongoDB Connection Error: {e}")
+
 def load_data():
+    """Firebase -> Mongo -> Local JSON ক্রমান্বয়ে ডাটা লোড করে"""
+    # ১. Firebase থেকে লোড করার চেষ্টা
+    try:
+        res = requests.get(f"{FIREBASE_DB_URL}/bot_config.json?auth={FIREBASE_API_KEY}", timeout=5)
+        if res.status_code == 200 and res.json():
+            data = res.json()
+            if "users" not in data: data["users"] = []
+            if "channels" not in data: data["channels"] = default_data["channels"]
+            if "buttons" not in data: data["buttons"] = []
+            return data
+    except Exception as e:
+        print(f"Firebase load error: {e}")
+
+    # ২. MongoDB থেকে লোড
     if use_mongo:
         try:
             data = db_collection.find_one({"_id": "bot_settings"})
-            if not data:
-                db_collection.insert_one(default_data)
-                return default_data
-            if "users" not in data:
-                data["users"] = []
-                save_data(data)
-            return data
+            if data:
+                if "users" not in data: data["users"] = []
+                if "channels" not in data: data["channels"] = default_data["channels"]
+                return data
         except Exception as e:
-            print(f"Error loading Mongo data: {e}")
-            return default_data
-    else:
-        if not os.path.exists(DATA_FILE):
-            save_data(default_data)
-            return default_data
+            print(f"Mongo load error: {e}")
+
+    # ৩. Local JSON ফাইল থেকে লোড
+    if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                if "users" not in data:
-                    data["users"] = []
+                if "users" not in data: data["users"] = []
+                if "channels" not in data: data["channels"] = default_data["channels"]
                 return data
         except Exception:
-            return default_data
+            pass
+
+    return default_data
 
 def save_data(data):
+    """Firebase, MongoDB এবং Local File এ স্বয়ংক্রিয়ভাবে সেভ করবে"""
+    # ১. Firebase এ অটোমেটিক সেভ
+    try:
+        requests.put(f"{FIREBASE_DB_URL}/bot_config.json?auth={FIREBASE_API_KEY}", json=data, timeout=5)
+    except Exception as e:
+        print(f"Firebase save error: {e}")
+
+    # ২. MongoDB তে সেভ
     if use_mongo:
         try:
             db_collection.replace_one({"_id": "bot_settings"}, data, upsert=True)
         except Exception as e:
-            print(f"Error saving to Mongo: {e}")
-    else:
+            print(f"Mongo save error: {e}")
+
+    # ৩. Local JSON ফাইলে ব্যাকআপ সেভ
+    try:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-    
-    sync_telegram_menu_commands()
+    except Exception as e:
+        print(f"Local save error: {e}")
 
 def register_user(user_id):
-    """ইউজারদের আইডি ডাটাবেজে সেভ রাখার জন্য ফাংশন"""
+    """ইউজার আইডি ডাটাবেজে সেভ রাখার ফাংশন"""
     data = load_data()
     users = data.get("users", [])
     if user_id not in users:
@@ -101,6 +130,7 @@ def register_user(user_id):
         save_data(data)
 
 # ================== টেলিগ্রাম মেনু বার আপডেট ==================
+
 def sync_telegram_menu_commands():
     try:
         data = load_data()
@@ -112,12 +142,13 @@ def sync_telegram_menu_commands():
             cmd_name = f"btn_{btn['id']}"
             cmd_desc = btn['title'][:25]
             commands.append(types.BotCommand(cmd_name, cmd_desc))
-            
+        
         bot.set_my_commands(commands)
     except Exception as e:
         print(f"Error updating commands menu: {e}")
 
 # ================== Web Server (Render 24/7 এর জন্য) ==================
+
 app = Flask('')
 
 @app.route('/')
@@ -133,10 +164,13 @@ def keep_alive():
     t.start()
 
 # ================== চ্যানেল সাবস্ক্রিপশন চেক ==================
+
 def is_user_subscribed(user_id):
     if user_id in ADMIN_IDS:
         return True
-    for ch in CHANNELS:
+    data = load_data()
+    channels = data.get("channels", [])
+    for ch in channels:
         try:
             member = bot.get_chat_member(ch["id"], user_id)
             if member.status in ['left', 'kicked']:
@@ -146,19 +180,31 @@ def is_user_subscribed(user_id):
     return True
 
 def send_force_join_msg(chat_id):
+    data = load_data()
+    channels = data.get("channels", [])
     markup = types.InlineKeyboardMarkup()
-    for ch in CHANNELS:
-        markup.add(types.InlineKeyboardButton(f"📢 Join {ch['name']}", url=ch["link"]))
-    markup.add(types.InlineKeyboardButton("🔄 চেক করুন", callback_data="check_subscription"))
-    
+
+    # চ্যানেলগুলোকে পাশাপাশি সাজানো (Row width 2)
+    chan_btns = []
+    for idx, ch in enumerate(channels, 1):
+        c_name = ch.get("name") if ch.get("name") else f"Chanel {idx}"
+        chan_btns.append(types.InlineKeyboardButton(f"📢 {c_name}", url=ch["link"]))
+
+    for i in range(0, len(chan_btns), 2):
+        markup.row(*chan_btns[i:i+2])
+
+    # নিচে 'Joined / 🔄 চেক করুন' বাটন
+    markup.add(types.InlineKeyboardButton("✅ Joined / 🔄 চেক করুন", callback_data="check_subscription"))
+
     bot.send_message(
         chat_id,
-        "❌ **বটটি ব্যবহার করতে আপনাকে অবশ্যই আমাদের চ্যানেলগুলোতে জয়েন করতে হবে!**\n\nনিচের বাটনগুলো থেকে জয়েন করে '🔄 চেক করুন' বাটনে চাপ দিন।",
+        "❌ **বটটি ব্যবহার করতে আপনাকে অবশ্যই আমাদের চ্যানেলগুলোতে জয়েন করতে হবে!**\n\nনিচের বাটনগুলো থেকে জয়েন করে 'Joined' বাটনে চাপ দিন।",
         reply_markup=markup,
         parse_mode="Markdown"
     )
 
 # ================== মেনু কিবোর্ড ==================
+
 def get_main_keyboard(user_id):
     data = load_data()
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -212,7 +258,7 @@ def send_welcome(message):
     if not is_user_subscribed(message.from_user.id):
         send_force_join_msg(message.chat.id)
         return
-
+        
     data = load_data()
     bot.send_message(
         message.chat.id, 
@@ -235,13 +281,14 @@ def show_dashboard_menu(chat_id):
     
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("➕ নতুন বাটন যোগ করুন", callback_data="add_btn"))
+    markup.add(types.InlineKeyboardButton("📢 চ্যানেল ম্যানেজমেন্ট (Force Join)", callback_data="manage_channels"))
     markup.add(types.InlineKeyboardButton("📝 ওয়েলকাম মেসেজ পরিবর্তন", callback_data="edit_welcome"))
     markup.add(types.InlineKeyboardButton("📢 ব্রডকাস্ট (মেসেজ পাঠান)", callback_data="broadcast_msg"))
     markup.add(types.InlineKeyboardButton(f"👥 মোট ইউজার: {total_users}", callback_data="user_count"))
     markup.add(types.InlineKeyboardButton("🔄 মেনু বার আপডেট করুন", callback_data="sync_menu"))
     
     for btn in data.get("buttons", []):
-        markup.add(types.InlineKeyboardButton(f"⚙️ {btn['title']}", callback_data=f"manage_btn_{btn['id']}"))
+        markup.add(types.InlineKeyboardButton(f"⚙️ বাটন: {btn['title']}", callback_data=f"manage_btn_{btn['id']}"))
         
     bot.send_message(
         chat_id, 
@@ -250,7 +297,8 @@ def show_dashboard_menu(chat_id):
         parse_mode="Markdown"
     )
 
-# ইনলাইন কলব্যাক হ্যান্ডলার
+# ================== ইনলাইন কলব্যাক হ্যান্ডলার ==================
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_dashboard_callbacks(call):
     chat_id = call.message.chat.id
@@ -278,6 +326,24 @@ def handle_dashboard_callbacks(call):
     if call.data == "add_btn":
         msg = bot.send_message(chat_id, "✏️ নতুন বাটনের **নাম (Title)** টি লিখে পাঠান:")
         bot.register_next_step_handler(msg, process_add_btn_title)
+
+    elif call.data == "manage_channels":
+        show_channel_management(chat_id)
+
+    elif call.data == "add_channel":
+        msg = bot.send_message(chat_id, "📌 নতুন চ্যানেলের **Chat ID** পাঠান (যেমন: `-1003730354126`):")
+        bot.register_next_step_handler(msg, process_add_channel_id)
+
+    elif call.data.startswith("edit_chan_"):
+        ch_id = int(call.data.split("_")[2])
+        show_single_channel_options(chat_id, ch_id)
+
+    elif call.data.startswith("del_chan_"):
+        ch_id = int(call.data.split("_")[2])
+        data["channels"] = [c for c in data.get("channels", []) if c["id"] != ch_id]
+        save_data(data)
+        bot.send_message(chat_id, "🗑️ চ্যানেলটি সফলভাবে ডিলিট করা হয়েছে!")
+        show_channel_management(chat_id)
 
     elif call.data == "edit_welcome":
         msg = bot.send_message(chat_id, "✏️ নতুন **ওয়েলকাম টেক্সট** লিখে পাঠান:")
@@ -326,6 +392,61 @@ def handle_dashboard_callbacks(call):
         save_data(data)
         bot.send_message(chat_id, "🗑️ বাটনটি সফলভাবে ডিলিট করা হয়েছে!", reply_markup=get_main_keyboard(chat_id))
         show_dashboard_menu(chat_id)
+
+# ================== চ্যানেল ম্যানেজমেন্ট ফাংশনালিটি ==================
+
+def show_channel_management(chat_id):
+    data = load_data()
+    channels = data.get("channels", [])
+    markup = types.InlineKeyboardMarkup()
+    
+    markup.add(types.InlineKeyboardButton("➕ নতুন চ্যানেল যোগ করুন", callback_data="add_channel"))
+    
+    for ch in channels:
+        c_name = ch.get('name', 'Channel')
+        markup.add(types.InlineKeyboardButton(f"📢 {c_name} ({ch['id']})", callback_data=f"edit_chan_{ch['id']}"))
+        
+    markup.add(types.InlineKeyboardButton("🔙 ড্যাশবোর্ডে ফিরুন", callback_data="back_to_dashboard"))
+    
+    bot.send_message(
+        chat_id, 
+        "📢 **চ্যানেল ম্যানেজমেন্ট (Force Join List)**\n\nবর্তমান চ্যানেলগুলোর তালিকা নিচে দেওয়া হলো:", 
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
+def show_single_channel_options(chat_id, ch_id):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🗑️ এই চ্যানেল ডিলিট করুন", callback_data=f"del_chan_{ch_id}"))
+    markup.add(types.InlineKeyboardButton("🔙 চ্যানেল লিস্টে ফিরুন", callback_data="manage_channels"))
+    bot.send_message(chat_id, f"⚙️ **চ্যানেল অপশন (ID: `{ch_id}`)**", reply_markup=markup, parse_mode="Markdown")
+
+def process_add_channel_id(message):
+    try:
+        ch_id = int(message.text.strip())
+        msg = bot.send_message(message.chat.id, "🔗 এবার চ্যানেলের **ইনভাইট লিংক (Link)** পাঠান:")
+        bot.register_next_step_handler(msg, process_add_channel_link, ch_id)
+    except Exception:
+        bot.send_message(message.chat.id, "❌ সঠিক চ্যানেল আইডি দেননি! আবার চেষ্টা করুন।")
+
+def process_add_channel_link(message, ch_id):
+    link = message.text.strip()
+    msg = bot.send_message(message.chat.id, "✏️ চ্যানেলের **ডিসপ্লে নাম** দিন (যেমন: `Chanel 1` বা `Income BD`):")
+    bot.register_next_step_handler(msg, process_add_channel_name, ch_id, link)
+
+def process_add_channel_name(message, ch_id, link):
+    name = message.text.strip()
+    data = load_data()
+    data["channels"].append({
+        "id": ch_id,
+        "link": link,
+        "name": name
+    })
+    save_data(data)
+    bot.send_message(message.chat.id, f"✅ চ্যানেল '{name}' সফলভাবে যুক্ত হয়েছে!")
+    show_channel_management(message.chat.id)
+
+# ================== বাটন প্রসেসর ফাংশন ==================
 
 def show_btn_options(chat_id, btn_id):
     markup = types.InlineKeyboardMarkup()
@@ -414,6 +535,7 @@ def process_edit_btn_content(message, btn_id):
     show_dashboard_menu(message.chat.id)
 
 # ================== ব্রডকাস্টিং প্রসেসর ==================
+
 def process_broadcast(message):
     data = load_data()
     users = data.get("users", [])
@@ -426,12 +548,12 @@ def process_broadcast(message):
     
     success = 0
     failed = 0
-
+    
     for user_id in users:
         try:
             bot.copy_message(chat_id=user_id, from_chat_id=message.chat.id, message_id=message.message_id)
             success += 1
-            time.sleep(0.05)  # Telegram API limit এড়ানোর জন্য ক্ষুদ্র বিরতি
+            time.sleep(0.05)  # API limit এড়ানোর জন্য ক্ষুদ্র বিরতি
         except Exception:
             failed += 1
 
@@ -444,13 +566,14 @@ def process_broadcast(message):
     )
 
 # ================== মেনু বার (Command Menu) রেসপন্স ==================
+
 @bot.message_handler(func=lambda m: m.text and m.text.startswith('/btn_'))
 def handle_menu_command_clicks(message):
     register_user(message.from_user.id)
     if not is_user_subscribed(message.from_user.id):
         send_force_join_msg(message.chat.id)
         return
-    
+
     try:
         btn_id = int(message.text.replace('/btn_', ''))
         data = load_data()
@@ -462,6 +585,7 @@ def handle_menu_command_clicks(message):
         print(f"Error handling menu command: {e}")
 
 # ================== সাধারণ ইউজার ক্লিকের হ্যান্ডলার ==================
+
 @bot.message_handler(content_types=['text', 'voice', 'audio', 'video', 'photo', 'document'])
 def handle_user_clicks(message):
     register_user(message.from_user.id)
@@ -482,11 +606,12 @@ def handle_user_clicks(message):
             return
 
 # ================== মেইন স্টার্ট প্রসেস ==================
+
 if __name__ == '__main__':
     keep_alive()  # Web server চালু
     sync_telegram_menu_commands()  # টেলিগ্রামের মূল মেনু বার আপডেট
     print("Bot is starting successfully...")
-    
+
     # অটোমেটিক রিস্টার্ট ও কানেকশন ধরে রাখার প্রসেস
     while True:
         try:
